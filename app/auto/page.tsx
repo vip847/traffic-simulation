@@ -1,8 +1,7 @@
-import V2ISimulation from "@/component/DBSIM";
 import TrafficSimulation from "@/component/TrafficSimulation";
 
 export default function Home() {
   return (
-    <V2ISimulation />
+    <TrafficSimulation />
   );
 }

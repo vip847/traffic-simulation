@@ -127,36 +127,6 @@ export default function TrafficSimulation() {
       ctx.fill();
     };
 
-    // --- Database Integration ---
-    const reportViolationToDB = async (car: Car) => {
-      try {
-        const res = await fetch('/api/violations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            // plateNumber: car.plate,
-            // driverName: car.driver,
-            zone: 'ZONE_B_INTERSECTION'
-          })
-        });
-
-        const data = await res.json();
-
-        // Handle Step 2: Critical Police Arrest Alert
-        if (res.status === 403 && data.alert === 'CRITICAL_ARREST') {
-          addLog(`🚨 SYSTEM OVERRIDE: ${data.message}`, 'violation');
-          return;
-        }
-
-        // Handle Step 7: Execution Logging
-        if (res.ok) {
-          // addLog(`Offense #${data.dispatch.offenseNumber} for ${car.driver}. Penalty: ${data.dispatch.penaltyApplied} (₹${data.dispatch.fine})`, 'warning');
-        }
-      } catch (err) {
-        console.error("Failed to connect to Penalty Engine", err);
-      }
-    };
-
     const updateAndDrawCars = () => {
       const cars = carsRef.current;
       for (let i = 0; i < cars.length; i++) {

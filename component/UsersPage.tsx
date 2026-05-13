@@ -3,9 +3,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
+import { toast } from 'react-toastify';
 
 interface Challan {
-  id: string; timestamp: string; zone: string; fine_amount: number; status: string; penalty_details: string;
+  id: string; timestamp: string; zone: string; fine_amount: number; status: string; penalty_details: string; vehicles?: { plate_number: string };
 }
 interface User {
   id: string; name: string; license_number: string; status: string; challans: Challan[];
@@ -14,9 +15,10 @@ interface User {
 export default function UsersPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
-  
+
   // Modal States
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
 
   // Form State
@@ -29,7 +31,7 @@ export default function UsersPage() {
 
   const fetchUsers = async () => {
     setLoading(true);
-    const { data, error } = await supabase.from('users').select('*, challans(*)').order('name', { ascending: true });
+    const { data, error } = await supabase.from('users').select('*, challans(*, vehicles(plate_number))').order('name', { ascending: true });
     if (!error && data) setUsers(data as User[]);
     setLoading(false);
   };
@@ -39,8 +41,64 @@ export default function UsersPage() {
   // --- Actions ---
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    await supabase.from('users').insert([{ name, license_number: license.toUpperCase() }]);
-    setName(''); setLicense(''); setIsCreateModalOpen(false);
+    const loadingToast = toast.loading('Creating driver...');
+    const { error } = await supabase.from('users').insert([
+      {
+        name,
+        license_number: license.toUpperCase(),
+      },
+    ]);
+
+    if (error) {
+      toast.update(loadingToast, {
+        render: error.message || 'Failed to create user',
+        type: 'error',
+        isLoading: false,
+        closeButton: true
+      });
+      return;
+    }
+    toast.update(loadingToast, {
+      render: 'Driver registered successfully',
+      type: 'success',
+      isLoading: false,
+      autoClose: 3000
+    });
+    setName('');
+    setLicense('');
+    setIsCreateModalOpen(false);
+    fetchUsers();
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const loadingToast = toast.loading('Updating driver...');
+    const { data, error } = await supabase.from('users').update([
+      {
+        name,
+        license_number: license.toUpperCase(),
+      },
+    ]).eq('id', selectedUser?.id).select('*, challans(*)');
+
+    if (error) {
+      toast.update(loadingToast, {
+        render: error.message || 'Failed to update user',
+        type: 'error',
+        isLoading: false,
+        closeButton: true
+      });
+      return;
+    }
+    toast.update(loadingToast, {
+      render: 'Driver updated successfully',
+      type: 'success',
+      isLoading: false,
+      autoClose: 3000
+    });
+    setName('');
+    setLicense('');
+    setIsUpdateModalOpen(false);
+    setSelectedUser(data[0]);
     fetchUsers();
   };
 
@@ -63,14 +121,14 @@ export default function UsersPage() {
   // --- Filtering Logic ---
   const filteredUsers = useMemo(() => {
     return users.filter(user => {
-      const matchesSearch = user.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            user.license_number.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = user.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        user.license_number.toLowerCase().includes(searchQuery.toLowerCase());
       const hasUnpaid = user.challans.some(c => c.status === 'UNPAID');
-      
+
       if (statusFilter === 'UNPAID' && !hasUnpaid) return false;
       if (statusFilter === 'CLEAR' && hasUnpaid) return false;
       if (statusFilter === 'LAPSED' && user.status !== 'LAPSED') return false;
-      
+
       return matchesSearch;
     });
   }, [users, searchQuery, statusFilter]);
@@ -78,7 +136,7 @@ export default function UsersPage() {
   return (
     <div className="min-h-screen bg-[#1e1e2f] text-white p-10 relative">
       <Link href="/" className="text-gray-400 hover:text-white mb-6 inline-block">← Back to Dashboard</Link>
-      
+
       {/* Header & Controls */}
       <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
         <div>
@@ -92,7 +150,7 @@ export default function UsersPage() {
 
       {/* Filters Bar */}
       <div className="bg-[#2a2a40] p-4 rounded-lg shadow-lg mb-6 flex flex-col md:flex-row gap-4">
-        <input 
+        <input
           type="text" placeholder="Search by name or license..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
           className="flex-1 p-2 rounded bg-[#1e1e2f] border border-gray-600 outline-none focus:border-[#7bed9f]"
         />
@@ -148,7 +206,7 @@ export default function UsersPage() {
       {/* MODAL: Create User */}
       {isCreateModalOpen && (
         <div onClick={() => setIsCreateModalOpen(false)} className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-          <div className="bg-[#2a2a40] p-6 rounded-lg w-full max-w-md relative shadow-2xl border border-gray-700">
+          <div onClick={(e) => e.stopPropagation()} className="bg-[#2a2a40] p-6 rounded-lg w-full max-w-md relative shadow-2xl border border-gray-700">
             <button onClick={() => setIsCreateModalOpen(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white text-xl">✕</button>
             <h2 className="text-2xl font-bold mb-6">Register New Driver</h2>
             <form onSubmit={handleCreateUser}>
@@ -167,10 +225,17 @@ export default function UsersPage() {
       {/* MODAL: Challan Details (Kept exactly the same as previous step, just ensure the formatting matches) */}
       {selectedUser && (
         <div onClick={() => setSelectedUser(null)} className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-          <div className="bg-[#2a2a40] p-6 rounded-lg w-full max-w-3xl max-h-[80vh] overflow-y-auto relative shadow-2xl border border-gray-700">
+          <div onClick={(e) => e.stopPropagation()} className="bg-[#2a2a40] p-6 rounded-lg w-full max-w-3xl max-h-[80vh] overflow-y-auto relative shadow-2xl border border-gray-700">
             <button onClick={() => setSelectedUser(null)} className="absolute top-4 right-4 text-gray-400 hover:text-white text-xl">✕</button>
-            <h2 className="text-2xl font-bold mb-1">{selectedUser.name}'s Records</h2>
-            <p className="text-gray-400 mb-6">License: {selectedUser.license_number}</p>
+            <div className='flex flex-row mb-6 gap-4'>
+              <div>
+                <h2 className="text-2xl font-bold mb-1">{selectedUser.name}'s Records</h2>
+                <p className="text-gray-400">License: {selectedUser.license_number}</p>
+              </div>
+              <div>
+                <button onClick={() => { setIsUpdateModalOpen(true); setName(selectedUser.name); setLicense(selectedUser.license_number); }} className='bg-yellow-500 hover:bg-amber-300 px-2 py-1 rounded mr-2' >edit</button>
+              </div>
+            </div>
             <div className="flex justify-between items-center mb-4 border-b border-gray-700 pb-4">
               <h3 className="text-xl font-bold text-[#ffa502]">Challan History</h3>
               {selectedUser.challans.some(c => c.status === 'UNPAID') && (
@@ -188,11 +253,11 @@ export default function UsersPage() {
                     <div>
                       <p className="font-mono text-xs text-gray-400 mb-1">{new Date(challan.timestamp).toLocaleString()}</p>
                       <p className="font-bold text-lg text-white">{challan.penalty_details}</p>
-                      <p className="text-sm text-gray-400 mt-1">📍 {challan.zone}</p>
+                      <p className="text-sm text-gray-400 mt-1">📍 {challan.zone} | Fine: ₹{challan.fine_amount} | Vehicle: <span className="text-[#ffa502] font-mono ml-1">{challan.vehicles?.plate_number || 'Unknown'}</span></p>
                     </div>
                     <div className="w-full sm:w-auto text-right">
                       {challan.status === 'PAID' ? (
-                        <span className="inline-block bg-green-900/30 text-green-400 px-4 py-2 rounded font-bold border border-green-800">✓ PAID</span>
+                        <span className="inline-block bg-green-900/30 text-green-400 px-4 py-2 rounded font-bold border border-green-800">✓ PAID  ₹{challan.fine_amount}</span>
                       ) : (
                         <button onClick={() => handlePayChallan(challan.id)} className="w-full sm:w-auto bg-[#ff4757] hover:bg-red-500 px-6 py-2 rounded font-bold text-white shadow">
                           Pay ₹{challan.fine_amount}
@@ -203,6 +268,24 @@ export default function UsersPage() {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {isUpdateModalOpen && (
+        <div onClick={() => { setIsUpdateModalOpen(false); setName(''); setLicense(''); }} className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+          <div onClick={(e) => e.stopPropagation()} className="bg-[#2a2a40] p-6 rounded-lg w-full max-w-md relative shadow-2xl border border-gray-700">
+            <button onClick={() => { setIsUpdateModalOpen(false); setName(''); setLicense(''); }} className="absolute top-4 right-4 text-gray-400 hover:text-white text-xl">✕</button>
+            <h2 className="text-2xl font-bold mb-6">Update Driver Info</h2>
+            <form onSubmit={handleUpdateUser}>
+              <label className="block text-sm text-gray-400 mb-1">Driver Name</label>
+              <input required type="text" value={name} onChange={(e) => setName(e.target.value)}
+                className="w-full p-2 mb-4 rounded bg-[#1e1e2f] border border-gray-600 outline-none focus:border-[#7bed9f]" />
+              <label className="block text-sm text-gray-400 mb-1">License Number</label>
+              <input required type="text" value={license} onChange={(e) => setLicense(e.target.value)}
+                className="w-full p-2 mb-6 rounded bg-[#1e1e2f] border border-gray-600 outline-none uppercase focus:border-[#7bed9f]" />
+              <button type="submit" className={`w-full bg-[#7bed9f] text-[#1e1e2f] font-bold py-3 rounded hover:opacity-90 transition-opacity ${name == selectedUser?.name && license == selectedUser.license_number ? 'cursor-not-allowed' : 'cursor-pointer'} `} disabled={name == selectedUser?.name && license == selectedUser.license_number} >Update</button>
+            </form>
           </div>
         </div>
       )}
