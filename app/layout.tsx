@@ -16,6 +16,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Traffic Simulator",
   description: "Created by Guardians",
+  icons: {
+    icon: '/icon.png', // Path relative to the public folder
+    apple: '/icon.png',      // For iOS devices
+  },
 };
 
 export default function RootLayout({

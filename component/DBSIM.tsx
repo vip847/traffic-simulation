@@ -7,7 +7,9 @@ import { supabase } from '@/lib/supabase';
 import { toast } from 'react-toastify';
 
 interface Car {
-  id: string; plate: string; driver: string; x: number; y: number; speed: number;
+  id: string; plate: string; driver: string; 
+  userId: string; vehicleId: string; // <-- Added to track active entities
+  x: number; y: number; speed: number;
   isViolator: boolean; hasPendingChallans: boolean; color: string; flagged: boolean; fined: boolean; opacity: number;
 }
 
@@ -37,7 +39,11 @@ export default function TrafficSimulation() {
   const carsRef = useRef<Car[]>([]);
   const isRedLightRef = useRef(true);
   const isAutoSpawnRef = useRef(false);
-  const isLogsMobileOpenRef = useRef(false); // Ref for tracking state inside intervals
+  const isLogsMobileOpenRef = useRef(false);
+
+  // Refs for DB Data so the background auto-spawn loop can access fresh data without re-rendering
+  const dbUsersRef = useRef<any[]>([]);
+  const dbVehiclesRef = useRef<any[]>([]);
 
   // --- Logger Utility with Notification Logic ---
   const addLog = (msg: string, type: 'SYSTEM' | 'WARNING' | 'VIOLATION') => {
@@ -65,8 +71,14 @@ export default function TrafficSimulation() {
     const fetchDB = async () => {
       const { data: uData } = await supabase.from('users').select('*');
       const { data: vData } = await supabase.from('vehicles').select('*');
-      if (uData) setDbUsers(uData);
-      if (vData) setDbVehicles(vData);
+      if (uData) {
+        setDbUsers(uData);
+        dbUsersRef.current = uData; // Sync Ref
+      }
+      if (vData) {
+        setDbVehicles(vData);
+        dbVehiclesRef.current = vData; // Sync Ref
+      }
     };
     fetchDB();
   }, []);
@@ -83,7 +95,10 @@ export default function TrafficSimulation() {
   // --- Spawn Logic (Manual & Auto) ---
   const triggerSpawn = async (pairsToSpawn: number, tableData: any[] = []) => {
     try {
-      const loadingToast = toast.loading('Spawning vehicles...');
+      // Only show toasts for manual spawns, bypass for auto-spawn
+      let loadingToast: any = null;
+      if (!isAutoSpawnRef.current) loadingToast = toast.loading('Spawning vehicles...');
+
       const res = await fetch('/api/pair', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -92,7 +107,7 @@ export default function TrafficSimulation() {
 
       const data = await res.json();
       if (!data.success) {
-        if (!isAutoSpawnRef.current) {
+        if (!isAutoSpawnRef.current && loadingToast) {
           setIsModalOpen(true);
           toast.update(loadingToast, {
             render: "Error spawning: " + data.error,
@@ -104,23 +119,27 @@ export default function TrafficSimulation() {
         return;
       }
 
-      toast.update(loadingToast, {
-        render: 'Drivers are spawning successfully',
-        type: 'success',
-        isLoading: false,
-        autoClose: 3000
-      });
+      if (!isAutoSpawnRef.current && loadingToast) {
+        toast.update(loadingToast, {
+          render: 'Drivers are spawning successfully',
+          type: 'success',
+          isLoading: false,
+          autoClose: 3000
+        });
+      }
 
       data.pairs.forEach((pair: any, index: number) => {
         setTimeout(() => {
           const isBlocked = pair.user.status === 'LAPSED';
           carsRef.current.push({
             id: Math.random().toString(),
+            userId: pair.user.id,          // <--- Track exact user ID
+            vehicleId: pair.vehicle.id,    // <--- Track exact vehicle ID
             plate: pair.vehicle.plate_number,
             driver: pair.user.name,
             x: 180,
             y: 650,
-            speed: isBlocked ? 0 : 2.5, // Standard speed
+            speed: isBlocked ? 0 : 2.5,
             isViolator: pair.willViolate,
             hasPendingChallans: pair.hasPendingChallans,
             color: pair.willViolate ? '#ffa502' : '#7bed9f',
@@ -129,8 +148,8 @@ export default function TrafficSimulation() {
             opacity: 1.0
           });
           if (pair.hasPendingChallans)
-            toast.error(`The Driver ${pair.user.name} with Vehicle Number ${pair.vehicle.plate_number} has pending challan.`, { autoClose: false });
-        }, index * 1000); // Stagger spawns to prevent overlay
+            toast.error(`The Driver ${pair.user.name} with Vehicle Number ${pair.vehicle.plate_number} has pending challan.`);
+        }, index * 1000); 
       });
     } catch (err) {
       console.error(err);
@@ -148,9 +167,22 @@ export default function TrafficSimulation() {
     let timeoutId: NodeJS.Timeout;
     const spawnLoop = async () => {
       if (isAutoSpawnRef.current) {
-        await triggerSpawn(1, []); // Spawn 1 completely random car
+        // 1. Get IDs currently active on canvas
+        const activeUserIds = new Set(carsRef.current.map(c => c.userId));
+        const activeVehicleIds = new Set(carsRef.current.map(c => c.vehicleId));
+
+        // 2. Filter DB arrays to only available entities
+        const availableUsers = dbUsersRef.current.filter(u => !activeUserIds.has(u.id));
+        const availableVehicles = dbVehiclesRef.current.filter(v => !activeVehicleIds.has(v.id));
+
+        // 3. If there are available resources, spawn one. If not, silently wait.
+        if (availableUsers.length > 0 && availableVehicles.length > 0) {
+          const randomUser = availableUsers[Math.floor(Math.random() * availableUsers.length)];
+          const randomVehicle = availableVehicles[Math.floor(Math.random() * availableVehicles.length)];
+          
+          await triggerSpawn(1, [{ userId: randomUser.id, vehicleId: randomVehicle.id, willViolate: '' }]);
+        }
       }
-      // Random wait between 1.5 to 3.5 seconds before spawning next car
       timeoutId = setTimeout(spawnLoop, Math.random() * 2000 + 1500);
     };
     spawnLoop();
@@ -203,27 +235,43 @@ export default function TrafficSimulation() {
 
     const loop = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw Road
       ctx.fillStyle = '#444'; ctx.fillRect(100, 0, 200, 600);
 
+      // Center line
       ctx.strokeStyle = '#fff';
       ctx.setLineDash([15, 15]);
       ctx.lineWidth = 4;
       ctx.beginPath(); ctx.moveTo(200, 0); ctx.lineTo(200, 600); ctx.stroke();
       ctx.setLineDash([]);
 
-      ctx.fillStyle = 'rgba(255, 165, 2, 0.2)'; ctx.fillRect(100, 280, 200, 40);
-      ctx.fillStyle = '#ffa502'; ctx.font = '12px Arial'; ctx.fillText('ZONE A (Stop Line)', 105, 295);
+      // Draw Stop Line & Zones
+      ctx.fillStyle = 'rgba(255, 165, 2, 0.2)';
+      ctx.fillRect(100, 280, 200, 40);
+      ctx.fillStyle = '#ffa502';
+      ctx.font = '12px Arial';
+      ctx.fillText('ZONE A (Stop Line)', 105, 295);
 
-      ctx.fillStyle = 'rgba(255, 71, 87, 0.2)'; ctx.fillRect(100, 150, 200, 60);
-      ctx.fillStyle = '#ff4757'; ctx.fillText('ZONE B (Trap)', 105, 165);
+      ctx.fillStyle = 'rgba(255, 71, 87, 0.2)';
+      ctx.fillRect(100, 150, 200, 60);
+      ctx.fillStyle = '#ff4757';
+      ctx.fillText('ZONE B (Trap)', 105, 165);
 
-      ctx.fillStyle = '#fff'; ctx.fillRect(100, 300, 200, 8);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(100, 300, 200, 8);
 
-      ctx.fillStyle = '#222'; ctx.fillRect(320, 250, 40, 100);
-      ctx.beginPath(); ctx.arc(340, 275, 12, 0, Math.PI * 2);
-      ctx.fillStyle = isRedLightRef.current ? '#ff4757' : '#555'; ctx.fill();
-      ctx.beginPath(); ctx.arc(340, 325, 12, 0, Math.PI * 2);
-      ctx.fillStyle = !isRedLightRef.current ? '#2ed573' : '#555'; ctx.fill();
+      // Draw Traffic Light Indicator
+      ctx.fillStyle = '#222';
+      ctx.fillRect(320, 250, 40, 100);
+      ctx.beginPath();
+      ctx.arc(340, 275, 12, 0, Math.PI * 2);
+      ctx.fillStyle = isRedLightRef.current ? '#ff4757' : '#555';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(340, 325, 12, 0, Math.PI * 2);
+      ctx.fillStyle = !isRedLightRef.current ? '#2ed573' : '#555';
+      ctx.fill();
 
       const cars = carsRef.current;
 
@@ -232,8 +280,10 @@ export default function TrafficSimulation() {
         let shouldStop = false;
 
         if (car.hasPendingChallans) {
-          ctx.fillStyle = `rgba(255, 71, 87, ${car.opacity})`; ctx.fillRect(car.x - 30, car.y - 30, 100, 20);
-          ctx.fillStyle = `rgba(255, 255, 255, ${car.opacity})`; ctx.font = '10px Arial'; ctx.fillText(`BLOCKED`, car.x - 5, car.y - 15);
+          ctx.fillStyle = `rgba(255, 71, 87, ${car.opacity})`;
+          ctx.fillRect(car.x - 30, car.y - 30, 100, 20);
+          ctx.fillStyle = `rgba(255, 255, 255, ${car.opacity})`;
+          ctx.font = '10px Arial'; ctx.fillText(`BLOCKED`, car.x - 5, car.y - 15);
           car.opacity -= 0.005;
           shouldStop = true;
         } else {
@@ -241,11 +291,20 @@ export default function TrafficSimulation() {
           for (let j = 0; j < cars.length; j++) {
             if (i !== j && cars[j].y < car.y) {
               let dist = car.y - (cars[j].y + 70);
-              if (dist > 0 && dist < closestCarAheadDist) closestCarAheadDist = dist;
+              if (dist > 0 && dist < closestCarAheadDist) {
+                closestCarAheadDist = dist;
+              }
             }
           }
-          if (closestCarAheadDist < 15) shouldStop = true;
-          if (isRedLightRef.current && !car.isViolator && car.y <= 340 && car.y > 300) shouldStop = true;
+
+          if (closestCarAheadDist < 15) {
+            shouldStop = true;
+          }
+
+          if (isRedLightRef.current && !car.isViolator && car.y <= 340 && car.y > 300) {
+            shouldStop = true;
+          }
+
           if (!shouldStop) car.y -= car.speed;
         }
 
@@ -263,9 +322,11 @@ export default function TrafficSimulation() {
 
         ctx.globalAlpha = Math.max(0, car.opacity);
         ctx.fillStyle = car.color; ctx.fillRect(car.x, car.y, 40, 70);
-        ctx.fillStyle = '#000'; ctx.font = '10px Arial';
+
+        ctx.fillStyle = '#000';
+        ctx.font = '10px Arial';
         ctx.fillText(car.driver, car.x + 2, car.y + 35);
-        ctx.fillText(car.plate.split('-')[2] + car.plate.split('-')[3], car.x + 2, car.y + 50);
+        ctx.fillText(car.plate.split('-')[2] + car.plate.split('-')[3], car.x + 2, car.y + 50); 
         ctx.globalAlpha = 1.0;
       }
 
@@ -299,7 +360,7 @@ export default function TrafficSimulation() {
       )}
 
       {/* LEFT CANVAS PANEL */}
-      <div className="flex-1 flex flex-col items-center justify-center py-6 px-4 overflow-y-auto lg:h-full pb-16 lg:pb-6 relative w-full">
+      <div className="flex-1 flex flex-col items-center py-6 px-4 overflow-y-auto lg:h-full pb-16 lg:pb-6 relative w-full">
         <Link href="/" className="lg:absolute relative lg:top-4 lg:left-6 text-gray-400 hover:text-white transition-colors mb-2 lg:mb-0 bg-[#1e1e2f]/80 lg:bg-transparent self-start">
           ← Dashboard
         </Link>
@@ -337,14 +398,13 @@ export default function TrafficSimulation() {
         </div>
       </div>
 
-      {/* RIGHT LOGS PANEL (Bottom Sheet on Mobile, Static Panel on Desktop) */}
+      {/* RIGHT LOGS PANEL */}
       <div className={`
         fixed bottom-0 left-0 right-0 h-[75vh] z-50 bg-[#2a2a40] rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.8)] 
         transition-transform duration-300 ease-in-out flex flex-col p-5 border-t border-gray-600
         lg:static lg:h-full lg:w-[450px] lg:rounded-none lg:shadow-none lg:border-t-0 lg:border-l lg:border-[#333] lg:translate-y-0 lg:shrink-0
         ${isLogsMobileOpen ? 'translate-y-0' : 'translate-y-full'}
       `}>
-        {/* Mobile Drag Handle Indicator */}
         <div className="lg:hidden w-12 h-1.5 bg-gray-600 rounded-full mx-auto mb-4" onClick={closeLogs} />
 
         <div className="flex justify-between items-center mb-4 shrink-0">
